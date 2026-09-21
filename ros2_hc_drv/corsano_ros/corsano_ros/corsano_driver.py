@@ -1,8 +1,8 @@
 from __future__ import annotations
 import io
 import time
-import subprocess
 import threading
+from datetime import datetime
 from logging import debug, error, info, warning
 
 import simplepyble
@@ -72,8 +72,7 @@ class CorsanoDriver:
         if not self.address:
             raise RuntimeError("[CorsanoDriver] No device address provided or found.")
 
-        # Initialize HCI reset command and available commands
-        self._init_hci_reset()
+        # Initialize available commands
         self._init_commands()
 
         # Connect and optionally start monitoring
@@ -105,7 +104,7 @@ class CorsanoDriver:
                 info(f"[CorsanoDriver] Found matching device: {name} ({addr})")
                 return addr
 
-        warning(f"[CorsanoDriver] No device found starting with '{prefix}', trying extended scan...")
+        info(f"[CorsanoDriver] No device found starting with '{prefix}', trying extended scan...")
         self.adapter.scan_for(timeout_ms * 2)
         results = self.adapter.scan_get_results()
 
@@ -118,10 +117,6 @@ class CorsanoDriver:
 
         error(f"[CorsanoDriver] Device with prefix '{prefix}' not found after rescan.")
         return None
-
-    def _init_hci_reset(self):
-        """Prepare shell command for resetting the HCI adapter."""
-        self.hci_reset_command = f"echo scai | sudo hciconfig {self.adapter_name} reset"
 
     def _init_commands(self):
         """Load available command definitions."""
@@ -161,9 +156,12 @@ class CorsanoDriver:
                     self.peripheral.notify(CORSANO_SERVICE, COMMAND_RX_CHAR, self._on_command_data)
                     self._connected_event.set()
                     self.connected = True
-                    info(f"[CorsanoDriver] Connected to {self.address}")
+                    info(
+                        f"[CorsanoDriver] {datetime.now().isoformat(sep=' ', timespec='milliseconds')} "
+                        f"Connected to {self.address}"
+                    )
             except RuntimeError:
-                error(f"[CorsanoDriver] Connection failed, retrying ({attempt + 1}/2)...")
+                info(f"[CorsanoDriver] Connection failed, retrying ({attempt + 1}/2)...")
                 attempt += 1
                 time.sleep(1)
         return True
@@ -174,26 +172,36 @@ class CorsanoDriver:
             while not self._stop_event.is_set():
                 time.sleep(self._reconnect_interval)
                 if self.peripheral and not self.peripheral.is_connected():
-                    warning("[CorsanoDriver] Device disconnected. Reconnecting...")
+                    warning(
+                        f"[CorsanoDriver] {datetime.now().isoformat(sep=' ', timespec='milliseconds')} "
+                        "Device disconnected. Reconnecting..."
+                    )
                     self.connected = False
                     self._attempt_reconnect()
 
         self._monitor_thread = threading.Thread(target=monitor, daemon=True)
         self._monitor_thread.start()
 
-    def _attempt_reconnect(self):
-        """Attempt to re-establish BLE connection after disconnection."""
+    def _attempt_reconnect(self, max_attempts: int = 5):
+        """Attempt to re-establish BLE connection after disconnection.
+
+        Does not unpair the device — an already-bonded device should be able
+        to reconnect directly, and unpairing forces a fresh pairing handshake
+        that requires re-confirming the pairing prompt on the host. Backs off
+        between attempts instead of recursing unbounded on failure.
+        """
         with self._reconnect_lock:
             self._connected_event.clear()
-            try:
-                subprocess.check_output(self.hci_reset_command, shell=True)
-                for dev in self.adapter.get_paired_peripherals():
-                    dev.unpair()
-                    time.sleep(1)
-                self.connect()
-            except Exception as e:
-                error(f"[CorsanoDriver] Reconnect failed: {e}")
-                self._attempt_reconnect()
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    self.connect()
+                    return
+                except Exception as e:
+                    info(
+                        f"[CorsanoDriver] Reconnect attempt {attempt}/{max_attempts} failed: {e}"
+                    )
+                    time.sleep(min(2 ** attempt, self._reconnect_interval))
+            warning(f"[CorsanoDriver] Giving up reconnecting after {max_attempts} attempts.")
 
     # ---------------------------------------------------------------------
     # Event Handlers
@@ -203,29 +211,42 @@ class CorsanoDriver:
         if self.buffer:
             self._start_tx = True
             self.buffer.write(data)
+        else:
+            debug(
+                f"[CorsanoDriver] {datetime.now().isoformat(sep=' ', timespec='milliseconds')} "
+                f"Unexpected file-channel data with no open buffer ({len(data)} bytes): {data.hex()}"
+            )
 
     def _on_command_data(self, data: bytes):
         """Callback invoked when command data is received."""
         if self.hash_func(data) != 0:
-            error("[CorsanoDriver] CRC check failed")
+            debug("[CorsanoDriver] CRC check failed")
             return
 
         cmd_id = data[0]
         cmd = self.commands.get(cmd_id)
         if not cmd:
-            error(f"[CorsanoDriver] Unknown command: {cmd_id}")
+            debug(f"[CorsanoDriver] Unknown command: {cmd_id}")
             return
 
         try:
-            if cmd_id in (FW_SET_WAKE_UP.cmd, CMD_UNKNOWN.cmd) and self.ping:
+            if cmd_id == FW_SET_WAKE_UP.cmd:
+                payload = cmd.process(data)
+                debug(
+                    f"[CorsanoDriver] {datetime.now().isoformat(sep=' ', timespec='milliseconds')} "
+                    f"{cmd.str(payload)}"
+                )
+                if self.ping:
+                    self.ping.update(cmd, payload)
+            elif cmd_id == CMD_UNKNOWN.cmd and self.ping:
                 self.ping.update(cmd, cmd.process(data))
-            elif cmd_id in self.stack:
+            elif isinstance(self.stack.get(cmd_id), threading.Event):
                 self.stack[cmd_id].set()
                 self.stack[cmd_id] = cmd.process(data)
             elif hasattr(cmd, "process"):
-                info(cmd.process(data))
+                debug(cmd.process(data))
             else:
-                info(data)
+                debug(data)
         except Exception as e:
             import traceback
             error(f"[CorsanoDriver] Error processing command {cmd_id}: {e}")

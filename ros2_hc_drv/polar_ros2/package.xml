@@ -11,6 +11,7 @@
 
   <exec_depend>rclpy</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>healthcare_msgs</exec_depend>
   <exec_depend>ros2launch</exec_depend>
   
   <export>

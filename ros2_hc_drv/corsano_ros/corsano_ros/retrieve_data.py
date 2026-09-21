@@ -5,7 +5,7 @@ from corsano_ros.parsers.stress_parser import StressParser, StressData
 from corsano_ros.parsers.accelerometer_parser import AccelerometerParser, AccelerometerData
 from corsano_ros.corsano_enums import FileNames
 from corsano_ros.commands import Command
-from logging import error, warning
+from logging import debug
 import time
 from typing import Optional
 import sys
@@ -20,7 +20,7 @@ def get_last_activity_data(
         file = driver.execute(cmd_get_file_size.cmd, file=FileNames["Activity_file"])
         size: int = file["size"]
     except Exception as e:
-        error(f"[corsano_ros::get_last_activity_data] Failed to get Activity file size: {e}")
+        debug(f"[corsano_ros::get_last_activity_data] Failed to get Activity file size: {e}")
         return None
 
     offset: int = size - 38
@@ -34,10 +34,14 @@ def get_last_activity_data(
 
     time.sleep(1)
     buffer_data: bytes = driver.get_buffer().read()
-    activity: Optional[ActivityData] = ActivityParser.parse(buffer_data)
+    try:
+        activity: Optional[ActivityData] = ActivityParser.parse(buffer_data)
+    except Exception as e:
+        debug(f"[corsano_ros::get_last_activity_data] Failed to parse Activity data: {e}")
+        return None
 
     if activity is None:
-        warning("[corsano_ros::get_last_activity_data] CRC check failed or invalid data")
+        debug("[corsano_ros::get_last_activity_data] CRC check failed or invalid data")
         return None
 
     return activity
@@ -60,13 +64,13 @@ def dump_bioz_file(
     try:
         file_info = driver.execute(cmd_get_file_size.cmd, file=file_name)
         size: int = file_info["size"]
-        print(f"BioZ file size: {size} bytes")
+        debug(f"BioZ file size: {size} bytes")
     except Exception as e:
-        error(f"[dump_bioz_file] Failed to get BioZ file size: {e}")
+        debug(f"[dump_bioz_file] Failed to get BioZ file size: {e}")
         return False
 
     if size == 0:
-        warning("[dump_bioz_file] BioZ file is empty.")
+        debug("[dump_bioz_file] BioZ file is empty.")
         return False
 
     # --- Open local file ---
@@ -99,16 +103,16 @@ def dump_bioz_file(
                 data = driver.get_buffer().read()
 
                 if not data:
-                    error("[dump_bioz_file] No data returned from device. Retrying...")
+                    debug("[dump_bioz_file] No data returned from device. Retrying...")
                 else:
 
                     f_out.write(data)
                     bytes_downloaded += len(data)
 
-                    print(f"Downloaded {bytes_downloaded}/{size} bytes")
+                    debug(f"Downloaded {bytes_downloaded}/{size} bytes")
             except Exception as e:
-                error(f"[dump_bioz_file] Error downloading the file, retrying... {e}")
-        print(f"[dump_bioz_file] File successfully saved to: {output_path}")
+                debug(f"[dump_bioz_file] Error downloading the file, retrying... {e}")
+        debug(f"[dump_bioz_file] File successfully saved to: {output_path}")
         sys.exit()
 
 
@@ -130,13 +134,13 @@ def get_last_bioz_data(
     try:
         file_info = driver.execute(cmd_get_file_size.cmd, file=file_name)
         size: int = file_info["size"]
-        print(f"BioZ file size: {size} bytes")
+        debug(f"BioZ file size: {size} bytes")
     except Exception as e:
-        error(f"[get_last_bioz_data] Failed to get BioZ file size: {e}")
+        debug(f"[get_last_bioz_data] Failed to get BioZ file size: {e}")
         return None
 
     if size == 0:
-        warning("[get_last_bioz_data] BioZ file is empty.")
+        debug("[get_last_bioz_data] BioZ file is empty.")
         return None
 
     # --- Download last chunk of file ---
@@ -153,24 +157,28 @@ def get_last_bioz_data(
                 offset=offset,
             )
     except Exception as e:
-        error(f"[get_last_bioz_data] Failed to stream BioZ file: {e}")
+        debug(f"[get_last_bioz_data] Failed to stream BioZ file: {e}")
         return None
 
     time.sleep(0.5)  # allow buffer to fill
     buffer_data = driver.get_buffer().read()
 
     if not buffer_data:
-        warning("[get_last_bioz_data] No data returned from buffer.")
+        debug("[get_last_bioz_data] No data returned from buffer.")
         return None
 
     # --- Parse packets and get last ---
-    parser.parse_packets(buffer_data)
-    last_packet = parser.get_last_packet()
+    try:
+        parser.parse_packets(buffer_data)
+        last_packet = parser.get_last_packet()
+    except Exception as e:
+        debug(f"[get_last_bioz_data] Failed to parse BioZ data: {e}")
+        return None
     if last_packet is None:
-        print("[get_last_bioz_data] No BioZ packets found in buffer.")
+        debug("[get_last_bioz_data] No BioZ packets found in buffer.")
         return None
 
-    print(
+    debug(
         f"[get_last_bioz_data] Decoded last BioZ record: "
         f"timestamp={last_packet.timestamp}, "
         f"index={last_packet.record_index}, "
@@ -193,11 +201,11 @@ def get_last_stress_data(
         file = driver.execute(cmd_get_file_size.cmd, file=file_name)
         size: int = file["size"]
     except Exception as e:
-        error(f"[corsano_ros::get_last_stress_data] Failed to get Stress file size: {e}")
+        debug(f"[corsano_ros::get_last_stress_data] Failed to get Stress file size: {e}")
         return None
 
     if size == 0:
-        warning("[corsano_ros::get_last_stress_data] Stress file is empty — check measurement plan.")
+        debug("[corsano_ros::get_last_stress_data] Stress file is empty — check measurement plan.")
         return None
 
     offset: int = max(size - 18, 0)
@@ -205,17 +213,21 @@ def get_last_stress_data(
     try:
         driver.execute(cmd_stream_file_with_size_offset.cmd, file=file_name, size=18, offset=offset)
     except Exception as e:
-        error(f"[corsano_ros::get_last_stress_data] Failed to stream Stress file: {e}")
+        debug(f"[corsano_ros::get_last_stress_data] Failed to stream Stress file: {e}")
         return None
 
     time.sleep(1)
     buffer_data: bytes = driver.get_buffer().read()
     if not buffer_data or len(buffer_data) < 18:
-        warning("[corsano_ros::get_last_stress_data] No data returned or not enough bytes.")
+        debug("[corsano_ros::get_last_stress_data] No data returned or not enough bytes.")
         return None
 
-    stress = parser.parse_last_record(buffer_data)
-    print(stress)
+    try:
+        stress = parser.parse_last_record(buffer_data)
+    except Exception as e:
+        debug(f"[corsano_ros::get_last_stress_data] Failed to parse Stress data: {e}")
+        return None
+    debug(stress)
     return stress
 
 
@@ -232,11 +244,11 @@ def get_last_accelerometer_data(
         file = driver.execute(cmd_get_file_size.cmd, file=file_name)
         size: int = file["size"]
     except Exception as e:
-        error(f"[corsano_ros::get_last_accelerometer_data] Failed to get accelerometer file size: {e}")
+        debug(f"[corsano_ros::get_last_accelerometer_data] Failed to get accelerometer file size: {e}")
         return None
 
     if size == 0:
-        warning("[corsano_ros::get_last_accelerometer_data] Accelerometer file is empty — check measurement plan.")
+        debug("[corsano_ros::get_last_accelerometer_data] Accelerometer file is empty — check measurement plan.")
         return None
 
     offset: int = max(size - 1024, 0)
@@ -249,13 +261,17 @@ def get_last_accelerometer_data(
                 cmd_stream_file_with_size_offset.cmd, file=file_name, size=size, offset=offset
             )
     except Exception as e:
-        error(f"[corsano_ros::get_last_accelerometer_data] Failed to stream accelerometer file: {e}")
+        debug(f"[corsano_ros::get_last_accelerometer_data] Failed to stream accelerometer file: {e}")
         return None
 
     time.sleep(1)
     buffer_data: bytes = driver.get_buffer().read()
     if not buffer_data:
-        warning("[corsano_ros::get_last_accelerometer_data] No data returned from buffer.")
+        debug("[corsano_ros::get_last_accelerometer_data] No data returned from buffer.")
         return None
 
-    return parser.process_metric_array(buffer_data, 0, metric_id=0x2B, metric_size=len(buffer_data))
+    try:
+        return parser.process_metric_array(buffer_data, 0, metric_id=0x2B, metric_size=len(buffer_data))
+    except Exception as e:
+        debug(f"[corsano_ros::get_last_accelerometer_data] Failed to parse accelerometer data: {e}")
+        return None

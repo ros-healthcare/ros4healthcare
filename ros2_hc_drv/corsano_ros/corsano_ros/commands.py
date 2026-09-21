@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import abc
+import hashlib
 import struct
 from datetime import datetime
 
@@ -390,7 +391,56 @@ class APP_PING_SPECIAL_MODE(Command):
         )
 
 
-class FW_SET_WAKE_UP(BaseCommand):
+class APP_CMD_GET_AUTH_STATUS(Command):
+    """Get authentication status from the watch."""
+
+    cmd = 251
+
+    def process(self, data):
+        return {"authenticated": data[1] == 100}
+
+    def str(self, data):
+        return f'Authenticated: {data["authenticated"]}'
+
+
+class APP_CMD_AUTHENTICATE(Command):
+    """Authenticate this client with the watch.
+
+    Mirrors the official app's SetAuthenticationRequest: a fixed
+    model-id byte, a fixed auth-key byte, and 8 bytes derived from a
+    client-chosen phone-id string (hex-decoded directly if it's 16 hex
+    characters, otherwise the first 8 bytes of its SHA-256 hash).
+    """
+
+    cmd = 250
+    AUTH_MODEL_ID_ANDROID = 0xA7
+    AUTH_KEY = 22
+
+    def execute(self, phone_id: str):
+        return (
+            self.cmd.to_bytes(1, "little")
+            + self.AUTH_MODEL_ID_ANDROID.to_bytes(1, "little")
+            + self.AUTH_KEY.to_bytes(1, "little")
+            + self._phone_id_bytes(phone_id)
+        )
+
+    @staticmethod
+    def _phone_id_bytes(phone_id: str) -> bytes:
+        if len(phone_id) == 16:
+            try:
+                return bytes(int(phone_id[i : i + 2], 16) for i in range(0, 16, 2))
+            except ValueError:
+                pass
+        return hashlib.sha256(phone_id.encode("utf-8")).digest()[:8]
+
+    def process(self, data):
+        return {"authenticated": data[1] == 100}
+
+    def str(self, data):
+        return f'Authenticated: {data["authenticated"]}'
+
+
+class FW_SET_WAKE_UP(Command):
     """Periodic watch-to-device ping to keep the connection alive."""
 
     cmd = 125
@@ -509,6 +559,8 @@ commands = (
     APP_CMD_GET_VITAL_PARAM,
     APP_CMD_START_SPECIAL_MODE,
     APP_PING_SPECIAL_MODE,
+    APP_CMD_GET_AUTH_STATUS,
+    APP_CMD_AUTHENTICATE,
     FW_SET_WAKE_UP,
     CMD_UNKNOWN,
 )
