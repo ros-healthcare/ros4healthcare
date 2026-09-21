@@ -1,2 +1,11 @@
 adapter_name: "hci0"
 mac_address_or_name: "287-2B"
+
+# Which data streams to publish. Any --ros-args -p publish_<stream>:=<bool>
+# passed on the command line overrides the value set here.
+publish_streams:
+  hr: true
+  bioz: false
+  accel: false
+  stress: false
+  battery: true
