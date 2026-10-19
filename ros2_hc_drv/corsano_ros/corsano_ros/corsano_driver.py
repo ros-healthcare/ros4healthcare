@@ -4,6 +4,7 @@ import time
 import threading
 from datetime import datetime
 from logging import debug, error, info, warning
+from typing import Callable, Optional
 
 import simplepyble
 
@@ -61,6 +62,12 @@ class CorsanoDriver:
         self._auto_reconnect = auto_reconnect
         self._reconnect_interval = reconnect_interval
         self._monitor_thread = None
+
+        # Called after a reconnect (not the initial connect, which the
+        # caller handles itself) re-establishes the BLE link, so the caller
+        # can redo any session-level handshake (time sync, auth, ...) the
+        # device requires again on every new connection.
+        self.on_reconnect: Optional[Callable[[], None]] = None
 
         # Resolve address from name or direct MAC
         if is_mac_address(name_or_address):
@@ -195,6 +202,11 @@ class CorsanoDriver:
             for attempt in range(1, max_attempts + 1):
                 try:
                     self.connect()
+                    if self.on_reconnect:
+                        try:
+                            self.on_reconnect()
+                        except Exception as e:
+                            warning(f"[CorsanoDriver] on_reconnect callback failed: {e}")
                     return
                 except Exception as e:
                     info(
