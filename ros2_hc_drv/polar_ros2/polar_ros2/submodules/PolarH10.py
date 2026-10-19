@@ -70,6 +70,7 @@ class PolarH10:
         publish_hr,
         publish_ecg,
         publish_battery=True,
+        ecg_per_frame=False,
     ):
         self.bleak_device = bleak_device
         self.bt_adapter = bt_adapter
@@ -78,6 +79,11 @@ class PolarH10:
         self.publish_hr = publish_hr
         self.publish_ecg = publish_ecg
         self.publish_battery = publish_battery
+        # One ECG message per BLE frame (sample_size = samples in the frame)
+        # instead of one per sample: a frame's ~73 samples then cost one
+        # publish, so frames arriving in a burst no longer queue behind
+        # thousands of single-sample publishes (live-path tail).
+        self.ecg_per_frame = ecg_per_frame
         self.combined_streaming_active = False
         self.hr_streaming_active = False
         self.session_id = str(uuid.uuid4())
@@ -578,6 +584,27 @@ class PolarH10:
         sample_timestamp = timestamp - ((len(samples) // step) - 1) * time_step
         offset = 0
 
+        if self.ecg_per_frame:
+            values = []
+            while offset + step <= len(samples):
+                ecg_val = self.convert_array_to_signed_int(samples, offset, step)
+                self.ecg_stream_values.append(ecg_val)
+                self.ecg_stream_times.append(sample_timestamp)
+                values.append(ecg_val / 1000.0)
+                offset += step
+                sample_timestamp += time_step
+            if self.publish_ecg and values:
+                ecg_msg = ECG()
+                ecg_msg.header.stamp = self.node.get_clock().now().to_msg()
+                ecg_msg.session_id = self.session_id
+                ecg_msg.channel_size = 1
+                ecg_msg.sample_size = len(values)
+                ecg_msg.ecg = values
+                ecg_msg.signal_quality = [1.0] * len(values)
+                self.pub_ecg.publish(ecg_msg)
+                self._publish_ecg_info_once()
+            return
+
         while offset + step <= len(samples):
             ecg_val = self.convert_array_to_signed_int(samples, offset, step)
             self.ecg_stream_values.append(ecg_val)
@@ -592,24 +619,28 @@ class PolarH10:
                 ecg_msg.signal_quality = [1.0]
                 self.pub_ecg.publish(ecg_msg)
 
-                if not self.ecg_info_published:
-                    info_msg = ECGInfo()
-                    device_msg = DeviceInfo()
-                    device_msg.session_id = self.session_id
-                    device_msg.device_manufacturer = "Polar"
-                    device_msg.device_name = "Polar H10"
-                    device_msg.device_type = "ECG sensor"
-                    device_msg.device_serial_number = self.bleak_device.address
-                    device_msg.measuring_unit = "mV"
-                    device_msg.acquisition_rate_hz = self.ECG_SAMPLING_FREQ
-                    info_msg.device_info = device_msg
-                    info_msg.units = ECGInfo.UNIT_MV
-                    info_msg.electrode_placement = [ECGInfo.PLACEMENT_CHEST]
-                    info_msg.lead_type = [ECGInfo.LEAD_UNKNOWN]
-                    self.pub_ecg_info.publish(info_msg)
-                    self.ecg_info_published = True
+                self._publish_ecg_info_once()
             offset += step
             sample_timestamp += time_step
+
+    def _publish_ecg_info_once(self):
+        if self.ecg_info_published:
+            return
+        info_msg = ECGInfo()
+        device_msg = DeviceInfo()
+        device_msg.session_id = self.session_id
+        device_msg.device_manufacturer = "Polar"
+        device_msg.device_name = "Polar H10"
+        device_msg.device_type = "ECG sensor"
+        device_msg.device_serial_number = self.bleak_device.address
+        device_msg.measuring_unit = "mV"
+        device_msg.acquisition_rate_hz = self.ECG_SAMPLING_FREQ
+        info_msg.device_info = device_msg
+        info_msg.units = ECGInfo.UNIT_MV
+        info_msg.electrode_placement = [ECGInfo.PLACEMENT_CHEST]
+        info_msg.lead_type = [ECGInfo.LEAD_UNKNOWN]
+        self.pub_ecg_info.publish(info_msg)
+        self.ecg_info_published = True
 
     @staticmethod
     def convert_array_to_signed_int(data, offset, length):

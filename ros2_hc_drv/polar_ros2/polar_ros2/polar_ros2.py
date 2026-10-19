@@ -42,6 +42,14 @@ def parse_args():
             default=None,
             help=f"Publish {stream} data (default: {default}).",
         )
+    parser.add_argument(
+        "--ecg-per-frame",
+        dest="ecg_per_frame",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Publish one ECG message per BLE frame (sample_size = samples in "
+        "the frame) instead of one per sample (default: off).",
+    )
     clean_args = remove_ros_args(sys.argv)
     return parser.parse_args(clean_args[1:])
 
@@ -55,6 +63,7 @@ class PolarConnector(Node):
         self.declare_parameter("publish_acceleration", True)
         self.declare_parameter("publish_ecg", True)
         self.declare_parameter("publish_battery", True)
+        self.declare_parameter("ecg_per_frame", False)
         self.declare_parameter("bluetooth_adapter", "hci0")
         self.declare_parameter("mac_address_or_name", "")
         self.pub_rr = self.create_publisher(Vector3Stamped, "polar_rr", 10)
@@ -71,6 +80,9 @@ class PolarConnector(Node):
         )
         self.publish_battery = (
             self.get_parameter("publish_battery").get_parameter_value().bool_value
+        )
+        self.ecg_per_frame = (
+            self.get_parameter("ecg_per_frame").get_parameter_value().bool_value
         )
         self.bluetooth_adapter = (
             self.get_parameter("bluetooth_adapter").get_parameter_value().string_value
@@ -127,6 +139,7 @@ class PolarConnector(Node):
                     self.publish_hr,
                     self.publish_ecg,
                     self.publish_battery,
+                    self.ecg_per_frame,
                 )
 
             log.error("[PolarConnector] No matching Polar device found. Retrying...")
@@ -211,6 +224,8 @@ def main(args=None):
         value = getattr(cli_args, f"publish_{stream}")
         if value is not None:
             overrides.append(Parameter(f"publish_{stream}", Parameter.Type.BOOL, value))
+    if cli_args.ecg_per_frame is not None:
+        overrides.append(Parameter("ecg_per_frame", Parameter.Type.BOOL, cli_args.ecg_per_frame))
     if overrides:
         polar_node.set_parameters(overrides)
 
