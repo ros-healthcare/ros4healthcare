@@ -109,12 +109,14 @@ class PolarConnector(Node):
         target = self.mac_address_or_name.upper() if self.mac_address_or_name else None
         while True:
             devices = await BleakScanner.discover()
-            print(f"Devices: {devices}")
+            # print(f"Devices: {devices}")
             for device in devices:
                 if device.name is None or "Polar H10" not in device.name:
                     continue
-                if target and target not in (device.address or "").upper() and (
-                    target not in device.name.upper()
+                if (
+                    target
+                    and target not in (device.address or "").upper()
+                    and (target not in device.name.upper())
                 ):
                     continue
                 return PolarH10(
@@ -194,12 +196,16 @@ def main(args=None):
     if cli_args.mac_address_or_name is not None:
         overrides.append(
             Parameter(
-                "mac_address_or_name", Parameter.Type.STRING, cli_args.mac_address_or_name
+                "mac_address_or_name",
+                Parameter.Type.STRING,
+                cli_args.mac_address_or_name,
             )
         )
     if cli_args.bluetooth_adapter is not None:
         overrides.append(
-            Parameter("bluetooth_adapter", Parameter.Type.STRING, cli_args.bluetooth_adapter)
+            Parameter(
+                "bluetooth_adapter", Parameter.Type.STRING, cli_args.bluetooth_adapter
+            )
         )
     for stream in ("hr", "acceleration", "ecg", "battery"):
         value = getattr(cli_args, f"publish_{stream}")
