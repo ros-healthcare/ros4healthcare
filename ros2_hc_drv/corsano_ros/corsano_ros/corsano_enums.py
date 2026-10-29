@@ -65,6 +65,27 @@ class PLAN_FREQUENCY(Enum):
     FREQ_256HZ = 4
     FREQ_512HZ = 5
 
+class VitalParameterWatchType(Enum):
+    """Which vital parameter a SET/GET_VITAL_PARAM command addresses.
+
+    Values taken from the Corsano BLE SDK (VitalParameterWatchType.watchValue,
+    com.corsano.sdk.ble.data), cross-checked on the wire: the official app's
+    capture shows GET_VITAL_PARAM (0xC1) issued for 0x01 and 0x02.
+    """
+    UNKNOWN         = 0
+    BIOZ            = 1
+    ACCELEROMETER   = 2
+    TEMPERATURE_RAW = 4
+
+
+class VitalParameterValue(Enum):
+    """Monitoring mode for a vital parameter (SDK: VitalParameterValue)."""
+    UNKNOWN          = 0
+    DISABLE          = 1
+    BEDTIME_RISETIME = 2
+    CONTINUOUS       = 3
+
+
 class SPECIAL_MODES(Enum):
     STRAP_OPTIMIZATION = 1
 

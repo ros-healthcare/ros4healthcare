@@ -2,7 +2,7 @@ from __future__ import annotations
 from logging import warning
 from dataclasses import dataclass
 from datetime import timezone
-from typing import Optional, Tuple
+from typing import Optional
 import numpy as np
 
 
@@ -38,9 +38,26 @@ class AccelerometerParser:
 
     This class decodes raw binary accelerometer packets into structured
     arrays of acceleration data, converting to SI units (m/s²).
+
+    Wire format, confirmed against a live device (records are 205 bytes,
+    packed back-to-back in the downloaded chunk with no guarantee that the
+    chunk starts on a record boundary):
+        [0:5]   fixed magic: 48 52 c8 00 0f
+        [5]     metric id (0x2B for accelerometer)
+        [6:8]   payload length, little-endian (bytes following this field)
+        [8]     packet index (0-255, wraps)
+        [9]     quality
+        [10]    bpi
+        [11]    af
+        [12]    reserved
+        [13:]   payload_length - 4 bytes of samples, 6 bytes each:
+                X, Y, Z as big-endian signed 16-bit integers
     """
 
     ACC_SR: int = 32  # Sampling rate in Hz (samples per second)
+    MAGIC_PREFIX = bytes.fromhex("4852c8000f")
+    HEADER_LEN = 13  # magic(6) + length(2) + index(1) + quality/bpi/af/reserved(4)
+    SAMPLE_SIZE = 6  # 3 axes x 2 bytes, big-endian signed
 
     def __init__(self, time_zone: timezone = timezone.utc) -> None:
         self.acc_time: float = 0.0
@@ -54,20 +71,18 @@ class AccelerometerParser:
         processed_index: int,
         metric_id: int,
         metric_size: int
-    ) -> Tuple[int, Optional[AccelerometerData]]:
+    ) -> Optional[AccelerometerData]:
         """
-        Process a metric array and return parsed accelerometer data.
+        Scan a downloaded chunk for accelerometer records and return the
+        most recent one found.
 
-        Args:
-            metric_array: The raw binary array of metric data.
-            processed_index: The current index within the array.
-            metric_id: Identifier for the metric type (0x2B = accelerometer).
-            metric_size: Total size of this metric in bytes.
+        The chunk isn't guaranteed to start on a record boundary (it's a
+        byte-offset window into the device's file, not one self-contained
+        record), so this synchronizes on the record's magic prefix rather
+        than assuming processed_index/metric_size delimit a single record.
 
-        Returns:
-            A tuple containing the updated processed index and an
-            AccelerometerData object if the metric was recognized,
-            or None otherwise.
+        Returns the last successfully decoded AccelerometerData, or None if
+        no complete, recognized record was found.
         """
         if metric_id != 0x2B:
             warning(
@@ -76,21 +91,43 @@ class AccelerometerParser:
             )
             return None
 
-        return self._process_acc(metric_array, processed_index, metric_size)
+        last_result = None
+        i = processed_index
+        n = len(metric_array)
 
-    def _process_acc(
-        self,
-        metric_array: bytes,
-        processed_index: int,
-        metric_size: int
-    ) -> Tuple[int, AccelerometerData]:
-        """Decode an accelerometer metric packet into structured data."""
-        # --- Parse 4-byte header ---
-        index = metric_array[processed_index]
-        quality = metric_array[processed_index + 1]
-        bpi = metric_array[processed_index + 2]
-        af = metric_array[processed_index + 3]
-        processed_index += 4
+        while i < n:
+            idx = metric_array.find(self.MAGIC_PREFIX, i)
+            if idx == -1:
+                break
+            if idx + 6 >= n or metric_array[idx + 5] != metric_id:
+                i = idx + 1
+                continue
+            if idx + self.HEADER_LEN > n:
+                break
+
+            payload_len = int.from_bytes(
+                metric_array[idx + 6 : idx + 8], byteorder="little"
+            )
+            record_len = 8 + payload_len  # length field covers everything after it
+            if idx + record_len > n:
+                break
+
+            record = self._decode_record(metric_array, idx, payload_len)
+            if record is not None:
+                last_result = record
+
+            i = idx + record_len
+
+        return last_result
+
+    def _decode_record(
+        self, metric_array: bytes, start: int, payload_len: int
+    ) -> Optional[AccelerometerData]:
+        """Decode one record beginning at `start` into structured data."""
+        index = metric_array[start + 8]
+        quality = metric_array[start + 9]
+        bpi = metric_array[start + 10]
+        af = metric_array[start + 11]
 
         # Detect dropped packets
         if self.last_index is not None:
@@ -102,34 +139,29 @@ class AccelerometerParser:
                 )
         self.last_index = index
 
-        # --- Number of samples ---
-        # Each sample = 3 axes × 2 bytes per axis = 6 bytes per sample
-        num_samples = (metric_size - 4) // 6
-        scale = 9.80665 / 512.0  # Convert raw units to m/s²
+        samples_start = start + self.HEADER_LEN
+        num_samples = (payload_len - 4) // self.SAMPLE_SIZE
+        if num_samples <= 0:
+            return None
 
+        scale = 9.80665 / 512.0  # Convert raw units to m/s²
         x_values = np.empty(num_samples, dtype=np.float32)
         y_values = np.empty(num_samples, dtype=np.float32)
         z_values = np.empty(num_samples, dtype=np.float32)
 
+        offset = samples_start
         for i in range(num_samples):
             x_values[i] = int.from_bytes(
-                metric_array[processed_index:processed_index + 2],
-                byteorder="little",
-                signed=True,
+                metric_array[offset:offset + 2], byteorder="big", signed=True
             ) * scale
             y_values[i] = int.from_bytes(
-                metric_array[processed_index + 2:processed_index + 4],
-                byteorder="little",
-                signed=True,
+                metric_array[offset + 2:offset + 4], byteorder="big", signed=True
             ) * scale
             z_values[i] = int.from_bytes(
-                metric_array[processed_index + 4:processed_index + 6],
-                byteorder="little",
-                signed=True,
+                metric_array[offset + 4:offset + 6], byteorder="big", signed=True
             ) * scale
-            processed_index += 6
+            offset += self.SAMPLE_SIZE
 
-        # Create structured result
         data = AccelerometerData(
             index=index,
             quality=quality,
@@ -140,8 +172,6 @@ class AccelerometerParser:
             z_values=z_values,
             timestamp_ms=self.acc_time,
         )
-
-        # Update timestamp
         self.acc_time += num_samples * 1000.0 / self.ACC_SR
         return data
 
