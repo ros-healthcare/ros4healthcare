@@ -56,6 +56,7 @@ jobs:
             git python3-colcon-common-extensions python3-rosdep \
             dpkg-dev fakeroot devscripts build-essential \
             debhelper dh-python python3-pip python3-bloom \
+            ca-certificates curl \
             ros-$ROS_DISTRO-rosidl-generator-c \
             ros-$ROS_DISTRO-rosidl-generator-cpp \
             ros-$ROS_DISTRO-ament-cmake \
@@ -68,6 +69,16 @@ jobs:
             apt install -y python3-ament-package
           fi
 
+          # healthcare_msgs isn't in the ROS apt repos; take it from the signed
+          # apt repo its own CI publishes (one repo per <distro>-<arch>).
+          # KEY.gpg is ASCII-armored, so it is stored as .asc for signed-by.
+          DEB_ARCH=$(dpkg --print-architecture)
+          HC_MSGS_REPO="https://scai-lab.github.io/healthcare_msgs/${ROS_DISTRO}-${DEB_ARCH}"
+          curl -fsSL "$HC_MSGS_REPO/KEY.gpg" -o /usr/share/keyrings/healthcare-msgs.asc
+          echo "deb [arch=${DEB_ARCH} signed-by=/usr/share/keyrings/healthcare-msgs.asc] $HC_MSGS_REPO ${ROS_DISTRO}-${OS_VERSION} main" \
+            > /etc/apt/sources.list.d/healthcare-msgs.list
+          apt update
+
           source /opt/ros/$ROS_DISTRO/setup.bash
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/ros/$ROS_DISTRO/lib
           export AMENT_PREFIX_PATH=/opt/ros/$ROS_DISTRO:$AMENT_PREFIX_PATH
@@ -75,15 +86,22 @@ jobs:
 
           echo "==== Environment setup complete ===="
 
+          # Keep the default rosdep sources: they hold the rules for system
+          # keys such as python3-setuptools, without which bloom-generate fails
+          # on the first package. The local list is named 10-* so it is read
+          # before 20-default.list and its rules take precedence.
           mkdir -p /etc/ros/rosdep/sources.list.d
-          rm -f /etc/ros/rosdep/sources.list.d/20-default.list
-          echo "yaml file:///tmp/rosdep_combined_override.yaml" > /etc/ros/rosdep/sources.list.d/50-local.list
+          echo "yaml file:///tmp/rosdep_combined_override.yaml" > /etc/ros/rosdep/sources.list.d/10-local.list
 
           if [ -f /workspace/rosdep_override.yaml ]; then
             cat /workspace/rosdep_override.yaml > /tmp/rosdep_combined_override.yaml
           else
             echo "# Static override not found, starting with empty file" > /tmp/rosdep_combined_override.yaml
           fi
+
+          echo "healthcare_msgs:" >> /tmp/rosdep_combined_override.yaml
+          echo "  ubuntu:" >> /tmp/rosdep_combined_override.yaml
+          echo "    $OS_VERSION: [ros-$ROS_DISTRO-healthcare-msgs]" >> /tmp/rosdep_combined_override.yaml
 
           for pkg in $(colcon list --names-only); do
             deb_pkg="ros-$ROS_DISTRO-${pkg//_/-}"
