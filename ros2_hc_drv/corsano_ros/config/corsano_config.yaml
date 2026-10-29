@@ -5,7 +5,7 @@ mac_address_or_name: "287-2B"
 # passed on the command line overrides the value set here.
 publish_streams:
   hr: true
-  bioz: false
-  accel: false
-  stress: false
+  bioz: true
+  accel: true
+  stress: true
   battery: true

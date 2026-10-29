@@ -12,6 +12,8 @@ from corsano_ros.corsano_enums import (
     PLAN,
     PLAN_FREQUENCY,
     SPECIAL_MODES,
+    VitalParameterValue,
+    VitalParameterWatchType,
 )
 
 
@@ -198,10 +200,23 @@ class CMD_GET_ACTIVE_MODE(Command):
     cmd = 49
 
     def process(self, data):
-        return {"mode_id": ModeID(int(data[1]))}
+        # Don't raise on a mode the enum doesn't know. Confirmed 2026-10-01:
+        # this watch reports mode 11, which isn't in ModeID (0-9), and the
+        # ValueError propagated out of the notification handler -- leaving
+        # driver.execute() to return its raw threading.Event instead of a
+        # result, so callers couldn't tell a failed read from a good one.
+        # Keep the raw value when it's unrecognised; that number is exactly
+        # what we need to see.
+        raw = int(data[1])
+        try:
+            return {"mode_id": ModeID(raw)}
+        except ValueError:
+            return {"mode_id": raw, "mode_unknown": True}
 
     def str(self, data):
-        return f'Current mode {ModeID(data["mode_id"]).name}'
+        mode = data["mode_id"]
+        name = mode.name if isinstance(mode, ModeID) else f"UNKNOWN({mode})"
+        return f'Current mode {name}'
 
 
 class CMD_GET_BATTERY_LEVEL(Command):
@@ -341,23 +356,72 @@ class APP_GET_PREV_USER_STATUS(Command):
         return f'Preventicus set to {data["preventicus"]}'
 
 
+class APP_CMD_SET_VITAL_PARAM(Command):
+    """Enable/disable recording of a vital parameter (BioZ, ACC, temperature).
+
+    This is what the SDK calls SetEmographyAndBiozPlan / SetAccelerometerPlan;
+    both are thin wrappers over SetVitalParameterRequest, whose payload is
+    [watchType, value1, (value2 only when present)] -- BioZ takes two values
+    (EmoGraphy, BioZ), the accelerometer takes one. A successful set is
+    acknowledged with 100, the same generic ACK the plan commands return.
+
+    This matters because these default to DISABLE: confirmed 2026-10-01 that
+    this watch read back BIOZ=[DISABLE, DISABLE] and ACCELEROMETER=DISABLE,
+    which is why raw ACC/BioZ never recorded in any session no matter which
+    plan was set. After sending CONTINUOUS for both they read back
+    [CONTINUOUS, CONTINUOUS] and CONTINUOUS, and ACC/PPG2 began growing.
+    """
+
+    cmd = 192
+
+    def execute(
+        self,
+        param: VitalParameterWatchType,
+        value: VitalParameterValue,
+        value2: VitalParameterValue = None,
+    ):
+        packet = (
+            self.cmd.to_bytes(1, "little")
+            + param.value.to_bytes(1, "little")
+            + value.value.to_bytes(1, "little")
+        )
+        if value2 is not None:
+            packet += value2.value.to_bytes(1, "little")
+        return packet
+
+    def process(self, data):
+        return {"ok": int(data[1]) == 100, "result": int(data[1])}
+
+    def str(self, data):
+        return "Set vital param " + ("OK" if data["ok"] else str(data["result"]))
+
+
 class APP_CMD_GET_VITAL_PARAM(Command):
     """Get current state of a vital parameter."""
 
     cmd = 193
 
-    def execute(self, param: int):
-        return self.cmd.to_bytes(1, "little") + param.to_bytes(1, "little")
+    def execute(self, param):
+        raw = param.value if isinstance(param, VitalParameterWatchType) else param
+        return self.cmd.to_bytes(1, "little") + raw.to_bytes(1, "little")
 
     def process(self, data):
-        return {
-            "param": int(data[1]),
-            "setting": struct.unpack("h", data[2:4])[0],
-        }
+        # Payload is [param, value1, value2?] -- one byte per value, NOT a
+        # little-endian short. Reading it as a short made BioZ's two DISABLEs
+        # (0x01, 0x01) show up as the single number 257.
+        def _val(raw):
+            try:
+                return VitalParameterValue(raw)
+            except ValueError:
+                return raw
+
+        out = {"param": int(data[1]), "value": _val(int(data[2]))}
+        if len(data) > 3:
+            out["value2"] = _val(int(data[3]))
+        return out
 
     def str(self, data):
-        return f'Vital param {data["param"]} setting {data["setting"]}'
-
+        return f'Vital param {data["param"]} = {data["value"]}'
 
 class APP_CMD_START_SPECIAL_MODE(Command):
     """Set watch to special mode."""
@@ -556,6 +620,7 @@ commands = (
     APP_CMD_GET_PLAN,
     APP_SET_PREV_USER_STATUS,
     APP_GET_PREV_USER_STATUS,
+    APP_CMD_SET_VITAL_PARAM,
     APP_CMD_GET_VITAL_PARAM,
     APP_CMD_START_SPECIAL_MODE,
     APP_PING_SPECIAL_MODE,
